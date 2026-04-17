@@ -280,6 +280,11 @@ input[type=checkbox] { accent-color: var(--accent); }
         </div>
         <div class="cb-row"><input type="checkbox" id="pad-frames" checked><label for="pad-frames">Zero-pad frame numbers</label></div>
         <div class="cb-row"><input type="checkbox" id="per-dir-folder" checked><label for="per-dir-folder">One folder per direction</label></div>
+        <div class="cb-row"><input type="checkbox" id="pack-atlas"><label for="pack-atlas">Pack spritesheet (texture.png + texture.json)</label></div>
+        <div class="field" id="atlas-prefix-wrap" style="display:none;margin-top:6px">
+          <label class="fl">Atlas key prefix</label>
+          <input type="text" id="atlas-key-prefix" value="" placeholder="e.g. 11 (optional)">
+        </div>
       </div>
 
       <div class="ps">
@@ -390,6 +395,8 @@ let currentFrame = 0, totalFrames = 0;
 let cancelExport = false;
 let currentDir = 0;
 let modelBBox = null;
+/** Horizontal look-at offset (world X/Z) so auto-fit can center content that drifts off origin when animated. */
+let lookAtXZ = new THREE.Vector2(0, 0);
 let exportSize = 256;
 let doneDirs = new Set();
 
@@ -466,7 +473,7 @@ function applyCamPreset(preset) {
   camera.near = 0.001; camera.far = 10000;
   camera.zoom = 1;
 
-  const target = new THREE.Vector3(0, chy, 0);
+  const target = new THREE.Vector3(lookAtXZ.x, chy, lookAtXZ.y);
   const dist = d * 5;
 
   switch (preset) {
@@ -489,16 +496,51 @@ function autoFit() {
     log('Auto-fit: load a model first.', 'warn');
     return;
   }
-  const box = getModelBoundingBox(model);
-  const size = box.getSize(new THREE.Vector3());
-  let maxDim = Math.max(size.x, size.y, size.z);
+
+  const savedDir = currentDir;
+  const savedFrame = currentFrame;
+  const savedPlay = playing;
+  playing = false;
+  if (currentAction) currentAction.paused = true;
+
+  const n = getNumDirs();
+  const frames = currentClip ? Math.max(1, totalFrames || 1) : 1;
+  const union = new THREE.Box3();
+  union.makeEmpty();
+
+  for (let di = 0; di < n; di++) {
+    setModelDir(di);
+    for (let fi = 0; fi < frames; fi++) {
+      if (currentClip && currentAction) seekToFrame(fi);
+      const box = getModelBoundingBox(model);
+      union.union(box);
+    }
+  }
+
+  setModelDir(savedDir);
+  if (currentClip && currentAction) seekToFrame(savedFrame);
+  playing = savedPlay;
+  if (currentAction) currentAction.paused = !playing;
+
+  let maxDim = 3;
+  let centerY = 0;
+  if (!union.isEmpty()) {
+    const size = union.getSize(new THREE.Vector3());
+    maxDim = Math.max(size.x, size.y, size.z);
+    const c = union.getCenter(new THREE.Vector3());
+    lookAtXZ.set(c.x, c.z);
+    centerY = c.y;
+  } else {
+    lookAtXZ.set(0, 0);
+  }
   if (!isFinite(maxDim) || maxDim <= 0) maxDim = 3;
+
   const f = (maxDim * 0.62).toFixed(3);
-  const h = (Math.max(size.y, 0) * 0.28).toFixed(3);
+  const h = centerY.toFixed(3);
   document.getElementById('frustum-size').value = f;
   document.getElementById('cam-height').value = h;
   applyCamPreset(document.getElementById('cam-preset').value);
-  log(`Auto-fit: frustum=${f}, lookAt.y=${h}`);
+  log(`Auto-fit: frustum=${f}, lookAt=(${lookAtXZ.x.toFixed(2)}, ${h}, ${lookAtXZ.y.toFixed(2)}) · ${n} dirs × ${frames} frame(s)`);
 }
 
 // ─── LOAD MODEL ───────────────────────────────────────────────────────────────
@@ -524,6 +566,7 @@ function loadGLTF(file) {
     model.position.y += size.y / 2;
     scene.add(model);
 
+    lookAtXZ.set(0, 0);
     // Auto camera
     document.getElementById('frustum-size').value = (Math.max(size.x, size.y, size.z) * 0.62).toFixed(3);
     document.getElementById('cam-height').value   = (size.y * 0.28).toFixed(3);
@@ -669,6 +712,94 @@ function refreshUI() {
     `DIR ${currentDir + 1}/${n}  ·  ${a}°  ·  FRAME ${currentFrame + 1}/${f}${currentClip ? `  ·  ${currentClip.name}` : ''}`;
 }
 
+// ─── ATLAS (trim + pack) ─────────────────────────────────────────────────────
+const ATLAS_MAX_SIDE = 8192;
+
+let readCanvas = null;
+let readCtx = null;
+function ensureReadCanvas(w, h) {
+  if (!readCanvas) readCanvas = document.createElement('canvas');
+  readCanvas.width = w;
+  readCanvas.height = h;
+  readCtx = readCanvas.getContext('2d', { willReadFrequently: true });
+}
+
+/** Alpha bounds in canvas space (top-left origin). Returns null if no opaque pixels. */
+function getAlphaBounds(imageData, w, h) {
+  const d = imageData.data;
+  let minX = w, minY = h, maxX = -1, maxY = -1;
+  for (let y = 0; y < h; y++) {
+    const row = y * w * 4;
+    for (let x = 0; x < w; x++) {
+      if (d[row + x * 4 + 3] > 0) {
+        if (x < minX) minX = x;
+        if (x > maxX) maxX = x;
+        if (y < minY) minY = y;
+        if (y > maxY) maxY = y;
+      }
+    }
+  }
+  if (maxX < minX) return null;
+  return { minX, minY, maxX, maxY };
+}
+
+function copyImageRegion(src, w, h, sx, sy, sw, sh) {
+  const out = new ImageData(sw, sh);
+  const sd = src.data;
+  const od = out.data;
+  for (let y = 0; y < sh; y++) {
+    for (let x = 0; x < sw; x++) {
+      const si = ((sy + y) * w + (sx + x)) * 4;
+      const oi = (y * sw + x) * 4;
+      od[oi] = sd[si];
+      od[oi + 1] = sd[si + 1];
+      od[oi + 2] = sd[si + 2];
+      od[oi + 3] = sd[si + 3];
+    }
+  }
+  return out;
+}
+
+/** Shelf pack, no rotation. placements[i] = { x, y, w, h } aligned with items order. */
+function packShelf(items, maxWidth) {
+  const n = items.length;
+  const sorted = items.map((it, idx) => ({ w: it.w, h: it.h, idx })).sort((a, b) => b.h - a.h);
+  let x = 0, y = 0, rowH = 0;
+  let atlasW = 0, atlasH = 0;
+  const placements = new Array(n);
+  const lineLimit = Math.min(ATLAS_MAX_SIDE, maxWidth);
+  for (const r of sorted) {
+    if (x + r.w > lineLimit && x > 0) {
+      x = 0;
+      y += rowH;
+      rowH = 0;
+    }
+    placements[r.idx] = { x, y, w: r.w, h: r.h };
+    atlasW = Math.max(atlasW, x + r.w);
+    atlasH = Math.max(atlasH, y + r.h);
+    rowH = Math.max(rowH, r.h);
+    x += r.w;
+  }
+  return { atlasW, atlasH, placements };
+}
+
+function estimateShelfWidth(items) {
+  let area = 0, mw = 0;
+  for (const it of items) {
+    area += it.w * it.h;
+    mw = Math.max(mw, it.w);
+  }
+  const guess = Math.ceil(Math.sqrt(area * 1.15));
+  return Math.min(ATLAS_MAX_SIDE, Math.max(mw, guess, 256));
+}
+
+function makeAtlasFrameKey(atlasKeyPrefix, dirStr, namePrefix, frameStr) {
+  const base = `${namePrefix}_${frameStr}.png`;
+  const p = atlasKeyPrefix.replace(/\/+$/, '').trim();
+  if (p) return `${p}/${dirStr}/${base}`;
+  return `${dirStr}/${base}`;
+}
+
 // ─── EXPORT ───────────────────────────────────────────────────────────────────
 async function doExport(dirsToCapture) {
   if (!model) return;
@@ -682,6 +813,8 @@ async function doExport(dirsToCapture) {
   const prefix   = document.getElementById('name-prefix').value || 'sprite';
   const pad      = document.getElementById('pad-frames').checked;
   const perFolder= document.getElementById('per-dir-folder').checked;
+  const packAtlas = document.getElementById('pack-atlas').checked;
+  const atlasKeyPrefix = (document.getElementById('atlas-key-prefix').value || '').trim();
 
   const frames  = currentClip ? Math.max(1, Math.ceil(currentClip.duration * fps)) : 1;
   const total   = dirsToCapture.length * frames;
@@ -691,7 +824,11 @@ async function doExport(dirsToCapture) {
   document.getElementById('cap-overlay').classList.add('active');
   renderer.setSize(expSize, expSize);
 
-  if (bgType === 'transparent') {
+  const useTransparent = bgType === 'transparent' || packAtlas;
+  if (packAtlas && bgType === 'color') {
+    log('Atlas: using transparent background for alpha trim.', 'warn');
+  }
+  if (useTransparent) {
     renderer.setClearColor(0x000000, 0);
     scene.background = null;
   } else {
@@ -707,7 +844,14 @@ async function doExport(dirsToCapture) {
   playing = false;
   if (currentAction) currentAction.paused = true;
 
+  /** @type {{ w: number, h: number, imageData: ImageData, key: string, minX: number, minY: number, trimW: number, trimH: number }[]} */
+  const atlasItems = [];
+  /** @type {Record<string, string[]>} */
+  const animByDir = {};
+
   try {
+    ensureReadCanvas(expSize, expSize);
+
     for (let di = 0; di < dirsToCapture.length; di++) {
       if (cancelExport) break;
 
@@ -718,6 +862,7 @@ async function doExport(dirsToCapture) {
       const dirStr = `dir${String(d).padStart(2, '0')}_${String(angle).padStart(3, '0')}deg`;
       const target = perFolder ? zip.folder(dirStr) : zip;
       const fnPrefix = perFolder ? prefix : `${prefix}_${dirStr}`;
+      if (packAtlas) animByDir[dirStr] = [];
 
       for (let f = 0; f < frames; f++) {
         if (cancelExport) break;
@@ -729,6 +874,37 @@ async function doExport(dirsToCapture) {
         const filename = `${fnPrefix}_${frameStr}.png`;
         const b64 = renderer.domElement.toDataURL('image/png').split(',')[1];
         target.file(filename, b64, { base64: true });
+
+        if (packAtlas) {
+          readCtx.clearRect(0, 0, expSize, expSize);
+          readCtx.drawImage(renderer.domElement, 0, 0);
+          const full = readCtx.getImageData(0, 0, expSize, expSize);
+          let minX = 0, minY = 0, trimW = 1, trimH = 1;
+          let trimmed = full;
+          const b = getAlphaBounds(full, expSize, expSize);
+          if (b) {
+            minX = b.minX;
+            minY = b.minY;
+            trimW = b.maxX - b.minX + 1;
+            trimH = b.maxY - b.minY + 1;
+            trimmed = copyImageRegion(full, expSize, expSize, minX, minY, trimW, trimH);
+          } else {
+            trimmed = new ImageData(1, 1);
+            trimmed.data[3] = 0;
+          }
+          const frameKey = makeAtlasFrameKey(atlasKeyPrefix, dirStr, prefix, frameStr);
+          atlasItems.push({
+            w: trimW,
+            h: trimH,
+            imageData: trimmed,
+            key: frameKey,
+            minX,
+            minY,
+            trimW,
+            trimH
+          });
+          animByDir[dirStr].push(frameKey);
+        }
 
         done++;
         const pct = Math.round(done / total * 100);
@@ -743,6 +919,63 @@ async function doExport(dirsToCapture) {
       }
       doneDirs.add(d);
       updateDirDial();
+    }
+
+    if (!cancelExport && packAtlas && atlasItems.length > 0) {
+      document.getElementById('ov-status').textContent = 'Packing atlas…';
+      await tick();
+
+      let maxW = estimateShelfWidth(atlasItems);
+      for (const it of atlasItems) maxW = Math.max(maxW, it.w);
+      maxW = Math.min(ATLAS_MAX_SIDE, maxW);
+      const { atlasW, atlasH, placements } = packShelf(atlasItems, maxW);
+
+      const atlasCanvas = document.createElement('canvas');
+      atlasCanvas.width = atlasW;
+      atlasCanvas.height = atlasH;
+      const actx = atlasCanvas.getContext('2d');
+      actx.clearRect(0, 0, atlasW, atlasH);
+
+      const framesJson = {};
+      for (let i = 0; i < atlasItems.length; i++) {
+        const it = atlasItems[i];
+        const pl = placements[i];
+        actx.putImageData(it.imageData, pl.x, pl.y);
+        framesJson[it.key] = {
+          frame: { x: pl.x, y: pl.y, w: it.trimW, h: it.trimH },
+          rotated: false,
+          trimmed: true,
+          spriteSourceSize: { x: it.minX, y: it.minY, w: it.trimW, h: it.trimH },
+          sourceSize: { w: expSize, h: expSize },
+          pivot: { x: 0.5, y: 0.5 }
+        };
+      }
+
+      const textureBase = `${prefix}_texture.png`;
+      const atlasB64 = atlasCanvas.toDataURL('image/png').split(',')[1];
+      zip.file(textureBase, atlasB64, { base64: true });
+
+      // Direct arrays of frame keys (TexturePacker / Pixi / SpriteSheetRegistry format — not { frames: [...] })
+      const animations = {};
+      for (const dirStr of Object.keys(animByDir)) {
+        animations[dirStr] = animByDir[dirStr];
+      }
+
+      const textureJson = {
+        frames: framesJson,
+        animations,
+        meta: {
+          app: 'ISO Sprite Exporter',
+          version: '1.0.0',
+          image: textureBase,
+          format: 'RGBA8888',
+          size: { w: atlasW, h: atlasH },
+          scale: 1
+        }
+      };
+      zip.file(`${prefix}_texture.json`, JSON.stringify(textureJson, null, 2));
+
+      log(`Atlas: ${atlasW}×${atlasH} · ${atlasItems.length} sprites → ${textureBase}`, 'ok');
     }
 
     if (!cancelExport) {
@@ -870,6 +1103,10 @@ document.getElementById('cw').addEventListener('change', () => { updateDirDial()
 
 document.getElementById('bg-type').addEventListener('change', e => {
   document.getElementById('bg-color').style.display = e.target.value === 'color' ? 'block' : 'none';
+});
+
+document.getElementById('pack-atlas').addEventListener('change', e => {
+  document.getElementById('atlas-prefix-wrap').style.display = e.target.checked ? 'block' : 'none';
 });
 
 document.getElementById('export-fps').addEventListener('change', () => {
