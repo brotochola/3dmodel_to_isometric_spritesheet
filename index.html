@@ -1,0 +1,909 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>ISO Sprite Exporter</title>
+<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet">
+<script type="importmap">
+{
+  "imports": {
+    "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+    "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+  }
+}
+</script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
+<style>
+* { box-sizing: border-box; margin: 0; padding: 0; }
+:root {
+  --bg: #0c0c0d;
+  --surface: #141416;
+  --surface2: #1c1c1f;
+  --border: #282829;
+  --accent: #f59e0b;
+  --green: #34d399;
+  --red: #f87171;
+  --blue: #60a5fa;
+  --text: #e2e2e4;
+  --muted: #5c5c61;
+  --font: 'JetBrains Mono', monospace;
+}
+html, body {
+  height: 100%; background: var(--bg);
+  color: var(--text); font-family: var(--font);
+  font-size: 12px; line-height: 1.5; overflow: hidden;
+}
+/* ── LAYOUT ── */
+.app { display: grid; grid-template-rows: 44px 1fr; height: 100vh; }
+.topbar {
+  display: flex; align-items: center; gap: 10px;
+  padding: 0 14px; border-bottom: 1px solid var(--border);
+  background: var(--surface); flex-shrink: 0;
+}
+.topbar-title { font-size: 12px; font-weight: 700; color: var(--accent); letter-spacing: .12em; text-transform: uppercase; }
+.topbar-sub { color: var(--muted); font-size: 10px; }
+.topbar-spacer { flex: 1; }
+.main { display: grid; grid-template-columns: 210px 1fr 210px; overflow: hidden; min-height: 0; }
+/* ── PANELS ── */
+.panel {
+  overflow-y: auto; display: flex; flex-direction: column;
+  border-right: 1px solid var(--border);
+}
+.panel.right { border-right: none; border-left: 1px solid var(--border); }
+.ps { padding: 11px; border-bottom: 1px solid var(--border); }
+.pl { font-size: 10px; font-weight: 700; color: var(--muted); text-transform: uppercase;
+  letter-spacing: .12em; margin-bottom: 9px; }
+/* ── PREVIEW ── */
+.preview-area { display: flex; flex-direction: column; background: var(--bg); overflow: hidden; }
+.canvas-wrap {
+  flex: 1; display: flex; align-items: center; justify-content: center;
+  position: relative; overflow: hidden;
+  background: radial-gradient(ellipse at 50% 40%, #171720 0%, #0c0c0d 70%);
+}
+.canvas-wrap::before {
+  content: ''; position: absolute; inset: 0; pointer-events: none;
+  background-image:
+    linear-gradient(rgba(255,255,255,.018) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(255,255,255,.018) 1px, transparent 1px);
+  background-size: 28px 28px;
+}
+#preview-canvas {
+  max-width: 90%; max-height: 90%;
+  image-rendering: pixelated; display: block;
+  box-shadow: 0 0 0 1px rgba(255,255,255,.06);
+}
+.canvas-overlay {
+  position: absolute; bottom: 10px; left: 50%; transform: translateX(-50%);
+  background: rgba(0,0,0,.72); border: 1px solid var(--border);
+  padding: 3px 10px; font-size: 10px; color: var(--muted);
+  letter-spacing: .07em; white-space: nowrap; backdrop-filter: blur(4px);
+}
+.drop-zone {
+  position: absolute; inset: 0; display: flex; flex-direction: column;
+  align-items: center; justify-content: center; gap: 10px; pointer-events: none;
+}
+.drop-zone.hidden { display: none; }
+.dz-hex { font-size: 52px; opacity: .1; line-height: 1; }
+.dz-text { color: var(--muted); font-size: 11px; text-align: center; line-height: 2; }
+/* ── CONTROLS BAR ── */
+.controls-bar {
+  border-top: 1px solid var(--border); padding: 7px 11px;
+  display: flex; align-items: center; gap: 7px; background: var(--surface); flex-shrink: 0;
+}
+.timeline { flex: 1; }
+input[type=range] {
+  -webkit-appearance: none; width: 100%; height: 3px;
+  background: var(--border); border-radius: 2px; outline: none; cursor: pointer;
+}
+input[type=range]::-webkit-slider-thumb {
+  -webkit-appearance: none; width: 11px; height: 11px;
+  background: var(--accent); border-radius: 50%;
+}
+input[type=range]:disabled { opacity: .35; cursor: default; }
+.frame-info { font-size: 10px; color: var(--muted); white-space: nowrap; min-width: 74px; text-align: right; }
+/* ── BUTTONS ── */
+.btn {
+  font-family: var(--font); font-size: 11px; font-weight: 500;
+  border: 1px solid var(--border); background: var(--surface2);
+  color: var(--text); padding: 4px 9px; cursor: pointer;
+  text-transform: uppercase; letter-spacing: .06em;
+  transition: border-color .12s, color .12s; white-space: nowrap;
+  display: inline-flex; align-items: center; gap: 4px;
+}
+.btn:hover:not(:disabled) { border-color: var(--accent); color: var(--accent); }
+.btn:disabled { opacity: .3; cursor: not-allowed; }
+.btn.primary { background: var(--accent); color: #000; border-color: var(--accent); font-weight: 700; }
+.btn.primary:hover:not(:disabled) { background: #fbbf24; color: #000; }
+.btn.sm { font-size: 10px; padding: 3px 7px; }
+.btn.danger { border-color: var(--red); color: var(--red); background: rgba(248,113,113,.07); }
+.btn.danger:hover:not(:disabled) { background: rgba(248,113,113,.18); }
+/* ── FIELDS ── */
+.field { margin-bottom: 9px; }
+.fl { font-size: 10px; color: var(--muted); text-transform: uppercase;
+  letter-spacing: .1em; margin-bottom: 3px; display: block; }
+input[type=number], input[type=text], select {
+  font-family: var(--font); font-size: 11px;
+  background: var(--bg); color: var(--text);
+  border: 1px solid var(--border); padding: 4px 7px;
+  width: 100%; outline: none;
+}
+input[type=number]:focus, input[type=text]:focus, select:focus { border-color: var(--accent); }
+select option { background: var(--surface); }
+input[type=color] {
+  width: 100%; height: 26px; border: 1px solid var(--border);
+  background: none; cursor: pointer; padding: 2px;
+}
+.cb-row { display: flex; align-items: center; gap: 7px; margin-bottom: 7px; font-size: 10px; color: var(--muted); }
+input[type=checkbox] { accent-color: var(--accent); }
+/* ── TAG ── */
+.tag {
+  font-size: 9px; padding: 1px 5px; background: var(--surface2);
+  border: 1px solid var(--border); color: var(--muted);
+  letter-spacing: .06em; text-transform: uppercase; white-space: nowrap;
+}
+.tag.green { border-color: var(--green); color: var(--green); background: rgba(52,211,153,.07); }
+.tag.amber { border-color: var(--accent); color: var(--accent); background: rgba(245,158,11,.07); }
+/* ── PROGRESS ── */
+.pbar-wrap { background: var(--border); height: 3px; border-radius: 2px; overflow: hidden; margin-top: 5px; }
+.pbar-fill { height: 100%; background: var(--green); transition: width .08s; width: 0%; }
+.status-ln { font-size: 10px; color: var(--muted); margin-top: 3px; }
+.status-ln.ok { color: var(--green); }
+/* ── ANIM LIST ── */
+.anim-item {
+  padding: 5px 8px; cursor: pointer; border: 1px solid transparent;
+  font-size: 10px; color: var(--muted); display: flex; align-items: center; gap: 6px;
+}
+.anim-item:hover { background: var(--surface2); }
+.anim-item.sel { border-color: var(--accent); color: var(--text); }
+.anim-dot { width: 5px; height: 5px; border-radius: 50%; background: var(--border); flex-shrink: 0; }
+.anim-item.sel .anim-dot { background: var(--accent); }
+.anim-dur { margin-left: auto; font-size: 9px; }
+/* ── DIR DIAL ── */
+.dir-dial-wrap { margin-bottom: 10px; }
+.dir-dial {
+  width: 82px; height: 82px; border-radius: 50%;
+  border: 1px solid var(--border); position: relative; margin: 0 auto 8px;
+  cursor: pointer;
+}
+.dir-dot {
+  width: 8px; height: 8px; border-radius: 50%; background: var(--surface2);
+  border: 1px solid var(--border); position: absolute;
+  transform: translate(-50%, -50%); cursor: pointer; transition: all .15s;
+}
+.dir-dot:hover { border-color: var(--accent); }
+.dir-dot.cur { background: var(--green); border-color: var(--green); box-shadow: 0 0 5px rgba(52,211,153,.5); }
+.dir-dot.done { background: rgba(52,211,153,.25); border-color: var(--green); }
+/* ── LOG ── */
+.log { flex: 1; overflow-y: auto; padding: 7px; font-size: 10px; }
+.log-entry { padding: 2px 0; border-bottom: 1px solid rgba(255,255,255,.02); display: flex; gap: 6px; }
+.log-entry .lt { color: #2a2a2d; min-width: 36px; flex-shrink: 0; }
+.log-entry .lm { color: var(--muted); }
+.log-entry.ok .lm { color: var(--green); }
+.log-entry.warn .lm { color: var(--accent); }
+.log-entry.err .lm { color: var(--red); }
+/* ── OVERLAY ── */
+.cap-overlay {
+  display: none; position: fixed; inset: 0;
+  background: rgba(0,0,0,.88); z-index: 200;
+  flex-direction: column; align-items: center; justify-content: center; gap: 14px;
+}
+.cap-overlay.active { display: flex; }
+.cap-title { font-size: 13px; font-weight: 700; color: var(--accent); text-transform: uppercase; letter-spacing: .12em; }
+.cap-box { width: 300px; }
+.cap-row { display: flex; justify-content: space-between; font-size: 11px; color: var(--muted); margin-bottom: 6px; }
+.cap-bar { width: 100%; height: 2px; background: var(--border); }
+.cap-fill { height: 100%; background: var(--green); width: 0%; transition: width .06s; }
+/* ── MISC ── */
+.sep { width: 1px; height: 18px; background: var(--border); flex-shrink: 0; }
+::-webkit-scrollbar { width: 3px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: var(--border); }
+.row { display: flex; gap: 5px; }
+</style>
+</head>
+<body>
+<div class="app">
+
+  <!-- TOP BAR -->
+  <div class="topbar">
+    <div class="topbar-title">ISO Sprite Exporter</div>
+    <div class="topbar-sub">GLTF → PNG Sequence</div>
+    <div class="topbar-spacer"></div>
+    <button class="btn" id="btn-load">📂 Load GLTF / GLB</button>
+    <input type="file" id="file-input" accept=".gltf,.glb" style="display:none">
+    <div class="sep"></div>
+    <span id="model-badge" class="tag">NO MODEL</span>
+  </div>
+
+  <div class="main">
+
+    <!-- ── LEFT PANEL ── -->
+    <div class="panel">
+
+      <div class="ps">
+        <div class="pl">Camera</div>
+        <div class="field">
+          <label class="fl">Preset</label>
+          <select id="cam-preset">
+            <option value="iso">Isometric (true 35.26°)</option>
+            <option value="iso45">Isometric (45° tilt)</option>
+            <option value="top">Top-down</option>
+            <option value="side">Side view</option>
+          </select>
+        </div>
+        <div class="field">
+          <label class="fl">Frustum Size</label>
+          <input type="number" id="frustum-size" value="3" min="0.1" max="200" step="0.1">
+        </div>
+        <div class="field">
+          <label class="fl">Look-at Height (Y)</label>
+          <input type="number" id="cam-height" value="0" step="0.05">
+        </div>
+        <div class="row">
+          <button class="btn sm" id="btn-apply-cam" style="flex:1">↻ Apply Camera</button>
+          <button class="btn sm" id="btn-autofit" style="flex:1">⊡ Auto-fit</button>
+        </div>
+      </div>
+
+      <div class="ps">
+        <div class="pl">Export Config</div>
+        <div class="field">
+          <label class="fl">Directions</label>
+          <input type="number" id="num-dirs" value="8" min="1" max="128">
+        </div>
+        <div class="field">
+          <label class="fl">FPS (frames/sec)</label>
+          <input type="number" id="export-fps" value="12" min="1" max="60">
+        </div>
+        <div class="field">
+          <label class="fl">Resolution</label>
+          <select id="export-size">
+            <option value="64">64 × 64</option>
+            <option value="128">128 × 128</option>
+            <option value="256" selected>256 × 256</option>
+            <option value="512">512 × 512</option>
+            <option value="1024">1024 × 1024</option>
+          </select>
+        </div>
+        <div class="field">
+          <label class="fl">Background</label>
+          <select id="bg-type">
+            <option value="transparent">Transparent (alpha)</option>
+            <option value="color">Solid color</option>
+          </select>
+          <input type="color" id="bg-color" value="#1a1a2e" style="margin-top:4px;display:none">
+        </div>
+        <div class="field">
+          <label class="fl">Name prefix</label>
+          <input type="text" id="name-prefix" value="sprite">
+        </div>
+        <div class="cb-row"><input type="checkbox" id="pad-frames" checked><label for="pad-frames">Zero-pad frame numbers</label></div>
+        <div class="cb-row"><input type="checkbox" id="per-dir-folder" checked><label for="per-dir-folder">One folder per direction</label></div>
+      </div>
+
+      <div class="ps">
+        <div class="pl">Rotation</div>
+        <div class="field">
+          <label class="fl">Start offset (deg)</label>
+          <input type="number" id="rot-offset" value="0" min="-360" max="360" step="45">
+        </div>
+        <div class="cb-row"><input type="checkbox" id="cw" checked><label for="cw">Clockwise direction order</label></div>
+      </div>
+
+      <div class="ps" style="flex:1">
+        <div class="pl">Animations</div>
+        <div id="anim-list"><div style="color:var(--muted);font-size:10px">No model loaded</div></div>
+      </div>
+
+    </div>
+
+    <!-- ── CENTER: PREVIEW ── -->
+    <div class="preview-area">
+      <div class="canvas-wrap" id="canvas-wrap">
+        <canvas id="preview-canvas"></canvas>
+        <div class="drop-zone" id="drop-zone">
+          <div class="dz-hex">⬡</div>
+          <div class="dz-text">Drop a .gltf or .glb file here<br>or click <strong style="color:var(--text)">Load</strong> above</div>
+        </div>
+        <div class="canvas-overlay" id="canvas-info">—</div>
+      </div>
+      <div class="controls-bar">
+        <button class="btn" id="btn-prev" title="Previous frame" disabled>◀</button>
+        <button class="btn" id="btn-play" title="Play / Pause" disabled>▶ PLAY</button>
+        <button class="btn" id="btn-next" title="Next frame" disabled>▶|</button>
+        <div class="sep"></div>
+        <div class="timeline">
+          <input type="range" id="timeline" min="0" max="0" value="0" disabled>
+        </div>
+        <div class="frame-info" id="frame-info">— / —</div>
+        <div class="sep"></div>
+        <button class="btn primary" id="btn-export-all" disabled>⬇ Export All Dirs</button>
+        <button class="btn" id="btn-export-dir" disabled>Current Dir</button>
+      </div>
+    </div>
+
+    <!-- ── RIGHT PANEL ── -->
+    <div class="panel right">
+
+      <div class="ps">
+        <div class="pl">Directions</div>
+        <div class="dir-dial-wrap">
+          <div class="dir-dial" id="dir-dial"></div>
+          <div style="text-align:center;margin-bottom:8px">
+            <span class="tag amber" id="dir-label">DIR 0 · 0°</span>
+          </div>
+          <div style="display:flex;gap:4px;flex-wrap:wrap;justify-content:center" id="dir-btns"></div>
+        </div>
+      </div>
+
+      <div class="ps">
+        <div class="pl">Export Progress</div>
+        <div style="display:flex;justify-content:space-between;align-items:center">
+          <span class="status-ln" id="status-txt">Idle</span>
+          <span style="font-size:10px;color:var(--muted)" id="pct-txt">—</span>
+        </div>
+        <div class="pbar-wrap"><div class="pbar-fill" id="pbar"></div></div>
+        <div style="font-size:10px;color:var(--muted);margin-top:5px" id="export-stats"></div>
+        <div style="margin-top:8px;display:flex;gap:5px">
+          <button class="btn sm" id="btn-preview-dir">◁ Preview Dir</button>
+          <button class="btn sm" id="btn-preview-all">▷ Preview All</button>
+        </div>
+      </div>
+
+      <div class="ps" style="padding-bottom:6px">
+        <div class="pl">Log</div>
+      </div>
+      <div class="log" id="log"></div>
+
+    </div>
+  </div>
+</div>
+
+<!-- CAPTURE OVERLAY -->
+<div class="cap-overlay" id="cap-overlay">
+  <div class="cap-title">Exporting…</div>
+  <div class="cap-box">
+    <div class="cap-row">
+      <span id="ov-status">Preparing…</span>
+      <span id="ov-pct">0%</span>
+    </div>
+    <div class="cap-bar"><div class="cap-fill" id="ov-bar"></div></div>
+    <div style="text-align:center;margin-top:12px">
+      <span id="ov-count" style="font-size:10px;color:var(--muted)">0 / 0 frames</span>
+    </div>
+  </div>
+  <button class="btn danger" id="btn-cancel">✕ Cancel Export</button>
+</div>
+
+<script type="module">
+import * as THREE from 'three';
+import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+
+// ─── CORE STATE ───────────────────────────────────────────────────────────────
+let scene, camera, renderer, controls, mixer;
+let model = null, clips = [], currentClip = null, currentAction = null;
+let clock = new THREE.Clock();
+let playing = false;
+let currentFrame = 0, totalFrames = 0;
+let cancelExport = false;
+let currentDir = 0;
+let modelBBox = null;
+let exportSize = 256;
+let doneDirs = new Set();
+
+// ─── RENDERER SETUP ───────────────────────────────────────────────────────────
+const canvas = document.getElementById('preview-canvas');
+renderer = new THREE.WebGLRenderer({
+  canvas, antialias: true, alpha: true, preserveDrawingBuffer: true
+});
+renderer.setPixelRatio(1);
+renderer.outputColorSpace = THREE.SRGBColorSpace;
+renderer.shadowMap.enabled = true;
+renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+renderer.setClearColor(0x000000, 0);
+renderer.setSize(256, 256);
+
+scene = new THREE.Scene();
+
+// Lights
+const ambLight = new THREE.AmbientLight(0xffffff, 0.65);
+scene.add(ambLight);
+const sun = new THREE.DirectionalLight(0xffffff, 1.3);
+sun.position.set(6, 12, 8);
+sun.castShadow = true;
+sun.shadow.mapSize.set(1024, 1024);
+scene.add(sun);
+const fill = new THREE.DirectionalLight(0x9999ff, 0.3);
+fill.position.set(-6, 3, -8);
+scene.add(fill);
+
+camera = new THREE.OrthographicCamera(-3, 3, 3, -3, 0.001, 10000);
+applyCamPreset('iso');
+
+controls = new OrbitControls(camera, renderer.domElement);
+controls.enableDamping = true;
+controls.dampingFactor = 0.07;
+
+// ─── RENDER LOOP ──────────────────────────────────────────────────────────────
+function loop() {
+  requestAnimationFrame(loop);
+  const dt = clock.getDelta();
+  if (playing && mixer && currentAction) {
+    mixer.update(dt);
+    syncFrameFromMixer();
+    refreshUI();
+  }
+  controls.update();
+  renderer.render(scene, camera);
+}
+loop();
+
+// ─── CAMERA PRESETS ───────────────────────────────────────────────────────────
+/** World-space bounds for the loaded model (handles nested meshes; falls back to Box3.setFromObject). */
+function getModelBoundingBox(root) {
+  root.updateMatrixWorld(true);
+  const box = new THREE.Box3();
+  const tmp = new THREE.Box3();
+  root.traverse((obj) => {
+    if (!obj.isMesh || !obj.geometry) return;
+    const geom = obj.geometry;
+    if (!geom.boundingBox) geom.computeBoundingBox();
+    if (!geom.boundingBox) return;
+    tmp.copy(geom.boundingBox).applyMatrix4(obj.matrixWorld);
+    box.union(tmp);
+  });
+  if (box.isEmpty()) box.setFromObject(root);
+  return box;
+}
+
+function applyCamPreset(preset) {
+  const d   = parseFloat(document.getElementById('frustum-size').value) || 3;
+  const chy = parseFloat(document.getElementById('cam-height').value)   || 0;
+  camera.left = -d; camera.right = d;
+  camera.top = d;   camera.bottom = -d;
+  camera.near = 0.001; camera.far = 10000;
+  camera.zoom = 1;
+
+  const target = new THREE.Vector3(0, chy, 0);
+  const dist = d * 5;
+
+  switch (preset) {
+    case 'iso':   camera.position.set(dist, dist, dist); break;
+    case 'iso45': camera.position.set(dist, dist * 0.57, dist); break;
+    case 'top':   camera.position.set(0, dist * 1.5, 0.0001); break;
+    case 'side':  camera.position.set(dist, 0, 0); break;
+  }
+  camera.lookAt(target);
+  camera.updateProjectionMatrix();
+  if (controls) {
+    controls.target.copy(target);
+    controls.update();
+    controls.saveState();
+  }
+}
+
+function autoFit() {
+  if (!model) {
+    log('Auto-fit: load a model first.', 'warn');
+    return;
+  }
+  const box = getModelBoundingBox(model);
+  const size = box.getSize(new THREE.Vector3());
+  let maxDim = Math.max(size.x, size.y, size.z);
+  if (!isFinite(maxDim) || maxDim <= 0) maxDim = 3;
+  const f = (maxDim * 0.62).toFixed(3);
+  const h = (Math.max(size.y, 0) * 0.28).toFixed(3);
+  document.getElementById('frustum-size').value = f;
+  document.getElementById('cam-height').value = h;
+  applyCamPreset(document.getElementById('cam-preset').value);
+  log(`Auto-fit: frustum=${f}, lookAt.y=${h}`);
+}
+
+// ─── LOAD MODEL ───────────────────────────────────────────────────────────────
+const loader = new GLTFLoader();
+
+function loadGLTF(file) {
+  const url = URL.createObjectURL(file);
+  log(`Loading "${file.name}" …`, 'warn');
+  if (model) { scene.remove(model); model = null; }
+  mixer = null; clips = []; currentClip = null; currentAction = null;
+  doneDirs.clear();
+
+  loader.load(url, gltf => {
+    model = gltf.scene;
+    model.traverse(n => { if (n.isMesh) { n.castShadow = true; n.receiveShadow = true; } });
+
+    const box = new THREE.Box3().setFromObject(model);
+    const center = box.getCenter(new THREE.Vector3());
+    const size   = box.getSize(new THREE.Vector3());
+    modelBBox = box;
+
+    model.position.sub(center);
+    model.position.y += size.y / 2;
+    scene.add(model);
+
+    // Auto camera
+    document.getElementById('frustum-size').value = (Math.max(size.x, size.y, size.z) * 0.62).toFixed(3);
+    document.getElementById('cam-height').value   = (size.y * 0.28).toFixed(3);
+    applyCamPreset(document.getElementById('cam-preset').value);
+
+    clips = gltf.animations || [];
+    mixer = new THREE.AnimationMixer(model);
+    buildAnimList();
+    if (clips.length > 0) selectClip(0);
+
+    document.getElementById('drop-zone').classList.add('hidden');
+    const badge = document.getElementById('model-badge');
+    badge.textContent = file.name.replace(/\.(gltf|glb)$/i, '');
+    badge.className = 'tag green';
+    document.getElementById('btn-export-all').disabled = false;
+    document.getElementById('btn-export-dir').disabled = false;
+    document.getElementById('btn-preview-dir').disabled = false;
+    document.getElementById('btn-preview-all').disabled = false;
+
+    updateDirDial();
+    setModelDir(0);
+    const mb = (file.size / 1024 / 1024).toFixed(1);
+    log(`Loaded. ${clips.length} anim(s). Dims: ${size.x.toFixed(2)}×${size.y.toFixed(2)}×${size.z.toFixed(2)} (${mb} MB)`, 'ok');
+    URL.revokeObjectURL(url);
+  }, xhr => {
+    if (xhr.total) log(`… ${Math.round(xhr.loaded / xhr.total * 100)}%`);
+  }, err => {
+    log(`Load error: ${err.message}`, 'err');
+  });
+}
+
+// ─── ANIMATION ────────────────────────────────────────────────────────────────
+function buildAnimList() {
+  const el = document.getElementById('anim-list');
+  el.innerHTML = '';
+  if (!clips.length) { el.innerHTML = '<div style="color:var(--muted);font-size:10px">No animations in this file</div>'; return; }
+  clips.forEach((clip, i) => {
+    const d = document.createElement('div');
+    d.className = 'anim-item';
+    d.innerHTML = `<div class="anim-dot"></div><span>${clip.name || `Clip ${i}`}</span><span class="anim-dur">${clip.duration.toFixed(2)}s</span>`;
+    d.addEventListener('click', () => selectClip(i));
+    el.appendChild(d);
+  });
+}
+
+function selectClip(idx) {
+  if (!mixer || !clips[idx]) return;
+  if (currentAction) currentAction.stop();
+  currentClip = clips[idx];
+  currentAction = mixer.clipAction(currentClip);
+  currentAction.play();
+  currentAction.paused = true;
+
+  const fps = getFPS();
+  totalFrames = Math.max(1, Math.ceil(currentClip.duration * fps));
+
+  document.querySelectorAll('.anim-item').forEach((el, i) => el.classList.toggle('sel', i === idx));
+  const tl = document.getElementById('timeline');
+  tl.disabled = false; tl.max = totalFrames - 1; tl.value = 0;
+  document.getElementById('btn-play').disabled = false;
+  document.getElementById('btn-prev').disabled = false;
+  document.getElementById('btn-next').disabled = false;
+
+  seekToFrame(0);
+  log(`Clip: "${currentClip.name}" · ${currentClip.duration.toFixed(3)}s · ${totalFrames} frames @ ${fps}fps`, 'ok');
+}
+
+function seekToFrame(f) {
+  if (!currentAction || !currentClip) return;
+  f = Math.max(0, Math.min(f, totalFrames - 1));
+  currentFrame = f;
+  const t = (f / getFPS()) % currentClip.duration;
+  currentAction.time = t;
+  if (currentAction.paused) mixer.update(0);
+  refreshUI();
+}
+
+function syncFrameFromMixer() {
+  if (!currentClip) return;
+  currentFrame = Math.floor(currentAction.time / currentClip.duration * totalFrames) % (totalFrames || 1);
+}
+
+// ─── DIRECTIONS ───────────────────────────────────────────────────────────────
+function getDirAngle(i, n) {
+  const off = parseFloat(document.getElementById('rot-offset').value) || 0;
+  const cw  = document.getElementById('cw').checked ? 1 : -1;
+  return (((off + (360 / n) * i * cw) % 360) + 360) % 360;
+}
+
+function setModelDir(i) {
+  if (!model) return;
+  currentDir = i;
+  const n = getNumDirs();
+  model.rotation.y = getDirAngle(i, n) * Math.PI / 180;
+  updateDirDial();
+  refreshUI();
+}
+
+function updateDirDial() {
+  const n    = getNumDirs();
+  const dial = document.getElementById('dir-dial');
+  const btns = document.getElementById('dir-btns');
+  dial.innerHTML = ''; btns.innerHTML = '';
+
+  for (let i = 0; i < n; i++) {
+    const a   = ((360 / n) * i - 90) * Math.PI / 180;
+    const r   = 33;
+    const x   = 41 + r * Math.cos(a);
+    const y   = 41 + r * Math.sin(a);
+    const dot = document.createElement('div');
+    dot.className = 'dir-dot' + (i === currentDir ? ' cur' : '') + (doneDirs.has(i) ? ' done' : '');
+    dot.style.left = x + 'px'; dot.style.top = y + 'px';
+    dot.title = `Dir ${i} · ${Math.round(getDirAngle(i, n))}°`;
+    dot.addEventListener('click', () => setModelDir(i));
+    dial.appendChild(dot);
+
+    if (n <= 16) {
+      const b = document.createElement('button');
+      b.className = 'btn sm' + (i === currentDir ? ' primary' : '');
+      b.textContent = i;
+      b.style.minWidth = '24px';
+      b.addEventListener('click', () => setModelDir(i));
+      btns.appendChild(b);
+    }
+  }
+  if (n > 16) btns.innerHTML = '<span style="font-size:10px;color:var(--muted)">Click dial dots to change dir</span>';
+
+  const angle = Math.round(getDirAngle(currentDir, n));
+  document.getElementById('dir-label').textContent = `DIR ${currentDir} · ${angle}°`;
+}
+
+// ─── UI REFRESH ───────────────────────────────────────────────────────────────
+function refreshUI() {
+  const f  = totalFrames || 1;
+  const fi = String(currentFrame + 1).padStart(4, '0');
+  const ft = String(f).padStart(4, '0');
+  document.getElementById('frame-info').textContent = `${fi} / ${ft}`;
+  document.getElementById('timeline').value = currentFrame;
+
+  const n = getNumDirs();
+  const a = Math.round(getDirAngle(currentDir, n));
+  document.getElementById('canvas-info').textContent =
+    `DIR ${currentDir + 1}/${n}  ·  ${a}°  ·  FRAME ${currentFrame + 1}/${f}${currentClip ? `  ·  ${currentClip.name}` : ''}`;
+}
+
+// ─── EXPORT ───────────────────────────────────────────────────────────────────
+async function doExport(dirsToCapture) {
+  if (!model) return;
+  cancelExport = false;
+  doneDirs.clear();
+
+  const fps      = getFPS();
+  const expSize  = parseInt(document.getElementById('export-size').value);
+  const bgType   = document.getElementById('bg-type').value;
+  const bgColor  = document.getElementById('bg-color').value;
+  const prefix   = document.getElementById('name-prefix').value || 'sprite';
+  const pad      = document.getElementById('pad-frames').checked;
+  const perFolder= document.getElementById('per-dir-folder').checked;
+
+  const frames  = currentClip ? Math.max(1, Math.ceil(currentClip.duration * fps)) : 1;
+  const total   = dirsToCapture.length * frames;
+  let done      = 0;
+  const t0      = performance.now();
+
+  document.getElementById('cap-overlay').classList.add('active');
+  renderer.setSize(expSize, expSize);
+
+  if (bgType === 'transparent') {
+    renderer.setClearColor(0x000000, 0);
+    scene.background = null;
+  } else {
+    const c = new THREE.Color(bgColor);
+    renderer.setClearColor(c, 1);
+    scene.background = c;
+  }
+
+  const zip = new JSZip();
+  const savedDir   = currentDir;
+  const savedFrame = currentFrame;
+  const savedPlay  = playing;
+  playing = false;
+  if (currentAction) currentAction.paused = true;
+
+  try {
+    for (let di = 0; di < dirsToCapture.length; di++) {
+      if (cancelExport) break;
+
+      const d = dirsToCapture[di];
+      const n = getNumDirs();
+      setModelDir(d);
+      const angle = Math.round(getDirAngle(d, n));
+      const dirStr = `dir${String(d).padStart(2, '0')}_${String(angle).padStart(3, '0')}deg`;
+      const target = perFolder ? zip.folder(dirStr) : zip;
+      const fnPrefix = perFolder ? prefix : `${prefix}_${dirStr}`;
+
+      for (let f = 0; f < frames; f++) {
+        if (cancelExport) break;
+        seekToFrame(f);
+        renderer.render(scene, camera);
+
+        const fn = String(f);
+        const frameStr = pad ? fn.padStart(4, '0') : fn;
+        const filename = `${fnPrefix}_${frameStr}.png`;
+        const b64 = renderer.domElement.toDataURL('image/png').split(',')[1];
+        target.file(filename, b64, { base64: true });
+
+        done++;
+        const pct = Math.round(done / total * 100);
+        document.getElementById('ov-bar').style.width = pct + '%';
+        document.getElementById('ov-pct').textContent = pct + '%';
+        document.getElementById('ov-status').textContent = `Dir ${di + 1}/${dirsToCapture.length} · Frame ${f + 1}/${frames}`;
+        document.getElementById('ov-count').textContent = `${done} / ${total} frames`;
+        document.getElementById('pbar').style.width = pct + '%';
+        document.getElementById('pct-txt').textContent = pct + '%';
+
+        if (f % 8 === 0) await tick();
+      }
+      doneDirs.add(d);
+      updateDirDial();
+    }
+
+    if (!cancelExport) {
+      document.getElementById('ov-status').textContent = 'Generating ZIP…';
+      await tick();
+      const blob = await zip.generateAsync({ type: 'blob', compression: 'STORE' });
+      download(blob, `${prefix}_sprites.zip`);
+
+      const secs = ((performance.now() - t0) / 1000).toFixed(1);
+      const mb   = (blob.size / 1024 / 1024).toFixed(1);
+      log(`✓ Export done: ${done} frames, ${mb} MB, ${secs}s`, 'ok');
+      document.getElementById('export-stats').textContent = `${done} frames · ${mb} MB · ${secs}s`;
+      document.getElementById('status-txt').textContent = `Done (${done} frames)`;
+      document.getElementById('status-txt').className = 'status-ln ok';
+    } else {
+      log('Export cancelled.', 'warn');
+      document.getElementById('status-txt').textContent = 'Cancelled';
+      document.getElementById('status-txt').className = 'status-ln';
+    }
+  } catch (e) {
+    log(`Export error: ${e.message}`, 'err');
+    console.error(e);
+  }
+
+  // Restore
+  renderer.setSize(exportSize, exportSize);
+  renderer.setClearColor(0x000000, 0);
+  scene.background = null;
+  setModelDir(savedDir);
+  seekToFrame(savedFrame);
+  playing = savedPlay;
+
+  document.getElementById('cap-overlay').classList.remove('active');
+}
+
+function allDirs()  { return Array.from({ length: getNumDirs() }, (_, i) => i); }
+function tick()     { return new Promise(r => setTimeout(r, 0)); }
+function download(blob, name) {
+  const u = URL.createObjectURL(blob);
+  Object.assign(document.createElement('a'), { href: u, download: name }).click();
+  URL.revokeObjectURL(u);
+}
+
+// ─── PREVIEW ALL DIRS ─────────────────────────────────────────────────────────
+let previewInterval = null;
+function stopPreview() { if (previewInterval) { clearInterval(previewInterval); previewInterval = null; } }
+
+function previewDirs(dirs) {
+  stopPreview();
+  if (!model) return;
+  let di = 0;
+  setModelDir(dirs[0]);
+  previewInterval = setInterval(() => {
+    di = (di + 1) % dirs.length;
+    setModelDir(dirs[di]);
+  }, 300);
+  log(`Previewing ${dirs.length} directions… (click again to stop)`, 'warn');
+}
+
+// ─── LOGGING ──────────────────────────────────────────────────────────────────
+function log(msg, type = '') {
+  const el = document.getElementById('log');
+  const now = new Date();
+  const t = `${now.getHours().toString().padStart(2,'0')}:${now.getMinutes().toString().padStart(2,'0')}`;
+  const e = document.createElement('div');
+  e.className = `log-entry ${type}`;
+  e.innerHTML = `<span class="lt">${t}</span><span class="lm">${msg}</span>`;
+  el.prepend(e);
+  while (el.children.length > 80) el.removeChild(el.lastChild);
+}
+
+// ─── GETTERS ──────────────────────────────────────────────────────────────────
+function getFPS()     { return Math.max(1, parseFloat(document.getElementById('export-fps').value) || 12); }
+function getNumDirs() { return Math.max(1, parseInt(document.getElementById('num-dirs').value) || 8); }
+
+// ─── EVENTS ───────────────────────────────────────────────────────────────────
+document.getElementById('btn-load').addEventListener('click', () => document.getElementById('file-input').click());
+document.getElementById('file-input').addEventListener('change', e => { if (e.target.files[0]) loadGLTF(e.target.files[0]); });
+
+const wrap = document.getElementById('canvas-wrap');
+wrap.addEventListener('dragover', e => { e.preventDefault(); wrap.style.outline = '2px solid var(--accent)'; });
+wrap.addEventListener('dragleave', () => { wrap.style.outline = ''; });
+wrap.addEventListener('drop', e => {
+  e.preventDefault(); wrap.style.outline = '';
+  const f = e.dataTransfer.files[0];
+  if (f && /\.(gltf|glb)$/i.test(f.name)) loadGLTF(f);
+  else log('Please drop a .gltf or .glb file', 'err');
+});
+
+document.getElementById('btn-play').addEventListener('click', () => {
+  if (!currentAction) return;
+  stopPreview();
+  playing = !playing;
+  currentAction.paused = !playing;
+  if (playing) clock.getDelta();
+  document.getElementById('btn-play').textContent = playing ? '⏸ PAUSE' : '▶ PLAY';
+});
+
+document.getElementById('btn-prev').addEventListener('click', () => {
+  playing = false; if (currentAction) currentAction.paused = true;
+  document.getElementById('btn-play').textContent = '▶ PLAY';
+  seekToFrame(currentFrame - 1);
+});
+document.getElementById('btn-next').addEventListener('click', () => {
+  playing = false; if (currentAction) currentAction.paused = true;
+  document.getElementById('btn-play').textContent = '▶ PLAY';
+  seekToFrame(currentFrame + 1);
+});
+
+document.getElementById('timeline').addEventListener('input', e => {
+  playing = false; if (currentAction) currentAction.paused = true;
+  document.getElementById('btn-play').textContent = '▶ PLAY';
+  seekToFrame(parseInt(e.target.value));
+});
+
+document.getElementById('btn-apply-cam').addEventListener('click', () => applyCamPreset(document.getElementById('cam-preset').value));
+document.getElementById('cam-preset').addEventListener('change', e => applyCamPreset(e.target.value));
+document.getElementById('btn-autofit').addEventListener('click', autoFit);
+
+document.getElementById('frustum-size').addEventListener('change', () => applyCamPreset(document.getElementById('cam-preset').value));
+
+document.getElementById('num-dirs').addEventListener('input', () => { doneDirs.clear(); updateDirDial(); setModelDir(0); });
+document.getElementById('rot-offset').addEventListener('input', () => { updateDirDial(); setModelDir(currentDir); });
+document.getElementById('cw').addEventListener('change', () => { updateDirDial(); setModelDir(currentDir); });
+
+document.getElementById('bg-type').addEventListener('change', e => {
+  document.getElementById('bg-color').style.display = e.target.value === 'color' ? 'block' : 'none';
+});
+
+document.getElementById('export-fps').addEventListener('change', () => {
+  if (currentClip) {
+    const fps = getFPS();
+    totalFrames = Math.max(1, Math.ceil(currentClip.duration * fps));
+    document.getElementById('timeline').max = totalFrames - 1;
+    seekToFrame(0);
+  }
+});
+
+document.getElementById('export-size').addEventListener('change', e => {
+  exportSize = parseInt(e.target.value);
+  renderer.setSize(exportSize, exportSize);
+});
+
+document.getElementById('btn-export-all').addEventListener('click', () => { stopPreview(); doExport(allDirs()); });
+document.getElementById('btn-export-dir').addEventListener('click', () => { stopPreview(); doExport([currentDir]); });
+document.getElementById('btn-cancel').addEventListener('click', () => { cancelExport = true; });
+
+let previewAllActive = false;
+document.getElementById('btn-preview-all').addEventListener('click', () => {
+  if (previewInterval) { stopPreview(); previewAllActive = false; }
+  else { previewAllActive = true; previewDirs(allDirs()); }
+});
+document.getElementById('btn-preview-dir').addEventListener('click', () => {
+  stopPreview(); setModelDir(currentDir);
+});
+
+// ─── INIT ─────────────────────────────────────────────────────────────────────
+updateDirDial();
+renderer.setSize(256, 256);
+refreshUI();
+log('Ready. Drop a GLTF/GLB file or use the Load button.', 'ok');
+</script>
+</body>
+</html>
